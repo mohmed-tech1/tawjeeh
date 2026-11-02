@@ -5,10 +5,11 @@
 
 ## التثبيت (مرة واحدة)
 
-افتح PowerShell داخل مجلد المشروع:
+يتطلب Git وPython 3.13. افتح PowerShell في المكان اللي تبي تحفظ فيه المشروع، ثم شغّل:
 
 ```powershell
-cd "$HOME\OneDrive\Desktop\Tawjeeh"
+git clone https://github.com/mohmed-tech1/tawjeeh.git
+cd tawjeeh
 py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
