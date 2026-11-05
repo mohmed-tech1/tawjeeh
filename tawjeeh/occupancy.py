@@ -1,19 +1,19 @@
 """
-تحديد حالة كل موقف في كل إطار + تثبيت الحالة عبر الزمن.
+Determine each spot's status in every frame and stabilize it over time.
 
-الحالة الخام لكل إطار (raw):
-  OCCUPIED : سيارة مكتشفة تغطي جزءًا كافيًا من الموقف.
-  FREE     : لا توجد سيارة مكتشفة، والمنطقة تبدو أرضية فارغة.
-  UNKNOWN  : (أ) تداخل جزئي غير حاسم أو سيارة مجاورة تغطي جزءًا كبيرًا من الموقف، أو (ب) لا يوجد كشف لكن المنطقة تبدو غير فارغة
-             (ربما سيارة لم يكتشفها النموذج)، أو (ج) الموقف خارج الصورة حاليًا.
-  -> لا نصنّف الموقف "متاحًا" إلا إذا كان الدليل واضحًا.
+Raw per-frame status:
+  OCCUPIED : a detected car covers enough of the spot.
+  FREE     : no detected car, and the area looks like empty ground.
+  UNKNOWN  : (a) inconclusive partial overlap, or a neighboring car covering much of the spot, or (b) no detection but the area does not look empty
+             (possibly a car the model missed), or (c) the spot is currently outside the image.
+  -> A spot is only labeled "available" when the evidence is clear.
 
-التثبيت الزمني (smoothing):
-  لكل موقف نافذة لآخر N حالات خام. تتغير الحالة المعروضة فقط إذا كانت نسبة حالة معينة
-  داخل النافذة أكبر من vote_ratio. هذا يمنع الوميض بين الأحمر والأخضر.
+Temporal smoothing:
+  Each spot has a window of its last N raw statuses. The displayed status changes only if one status's share
+  of the window exceeds vote_ratio. This prevents flickering between red and green.
 
-منع احتساب السيارة الواحدة في أكثر من موقف:
-  كل سيارة تُسند إلى موقف واحد فقط: الموقف الذي تقع داخله أكبر نسبة من مساحتها.
+Preventing one car from counting toward multiple spots:
+  Each car is assigned to one spot only: the spot containing the largest share of its area.
 """
 
 from __future__ import annotations
@@ -30,13 +30,13 @@ STATE_NAMES = {FREE: "free", OCCUPIED: "occupied", UNKNOWN: "unknown"}
 
 @dataclass
 class OccupancyParams:
-    occupied_overlap: float = 0.35   # نسبة مساحة السيارة داخل الموقف لاعتباره مشغولًا
-    partial_overlap: float = 0.15    # أقل من occupied وأكبر من هذه = غير مؤكد
-    blocked_coverage: float = 0.25   # سيارة (مُسندة لموقف مجاور) تغطي هذه النسبة من الموقف = غير مؤكد
-    busy_threshold: float = 0.10     # كثافة الحواف داخل موقف بلا كشف: فوقها = غير مؤكد
-    window_seconds: float = 0.5      # طول نافذة التثبيت الزمني
-    vote_ratio: float = 0.6          # نسبة الأصوات المطلوبة لتغيير الحالة
-    keep_ratio: float = 0.3          # أقل نسبة للإبقاء على الحالة السابقة
+    occupied_overlap: float = 0.35   # share of the car area inside the spot to count it as occupied
+    partial_overlap: float = 0.15    # below occupied and above this = uncertain
+    blocked_coverage: float = 0.25   # a car (assigned to a neighboring spot) covering this share of the spot = uncertain
+    busy_threshold: float = 0.10     # edge density inside a spot with no detection: above this = uncertain
+    window_seconds: float = 0.5      # length of the smoothing window
+    vote_ratio: float = 0.6          # share of votes required to change status
+    keep_ratio: float = 0.3          # minimum share to keep the previous status
     use_appearance_check: bool = True
 
     @staticmethod
@@ -64,10 +64,10 @@ class OccupancyTracker:
 
     # ------------------------------------------------------------------ #
     def raw_states(self, det_polys_ref, frame=None, H_ref_to_frame=None):
-        """det_polys_ref: مضلعات السيارات بإحداثيات الإطار المرجعي."""
+        """det_polys_ref: car polygons in reference-frame coordinates."""
         n = len(self.spots)
-        best = np.zeros(n)             # أكبر نسبة من مساحة سيارة مُسندة لهذا الموقف
-        covered = np.zeros(n)          # أكبر نسبة من مساحة الموقف تغطيها أي سيارة (حتى غير المُسندة له)
+        best = np.zeros(n)             # largest share of an assigned car area in this spot
+        covered = np.zeros(n)          # largest share of the spot covered by any car (even if not assigned to it)
         for dp in det_polys_ref:
             dp = dp.astype(np.float32)
             d_area = cv2.contourArea(dp)
@@ -83,11 +83,11 @@ class OccupancyTracker:
                 if r > best_r:
                     best_j, best_r = j, r
             if best_j >= 0:
-                best[best_j] = max(best[best_j], best_r)  # السيارة تُحسب لموقف واحد فقط
+                best[best_j] = max(best[best_j], best_r)  # the car counts toward one spot only
 
         raw = np.full(n, FREE, np.int8)
         raw[best >= self.p.partial_overlap] = UNKNOWN
-        # سيارة متجاورة تغطي جزءًا كبيرًا من الموقف (متوقفة على الحد) -> لا نعتبره متاحًا
+        # A neighboring car covers much of the spot (parked on the line) -> do not treat it as available
         raw[covered >= self.p.blocked_coverage] = UNKNOWN
         raw[best >= self.p.occupied_overlap] = OCCUPIED
 
@@ -98,7 +98,7 @@ class OccupancyTracker:
             for j in range(n):
                 pts = cv2.perspectiveTransform(self.polys[j].reshape(-1, 1, 2), H_ref_to_frame).reshape(-1, 2)
                 if pts[:, 0].min() < 0 or pts[:, 1].min() < 0 or pts[:, 0].max() >= w or pts[:, 1].max() >= h:
-                    raw[j] = UNKNOWN          # الموقف خارج الصورة
+                    raw[j] = UNKNOWN          # spot is outside the image
                     continue
                 if raw[j] == FREE and self.p.use_appearance_check:
                     busy = _edge_density(edges, pts)
@@ -115,14 +115,14 @@ class OccupancyTracker:
             cnt = np.bincount(np.fromiter(hist, np.int8), minlength=3)
             ratios = cnt / len(hist)
             cur = self.state[j]
-            if len(hist) < 3:                       # بداية الفيديو: نأخذ الحالة مباشرة
+            if len(hist) < 3:                       # start of video: take the status directly
                 self.state[j] = r
             elif ratios[OCCUPIED] >= self.p.vote_ratio:
                 self.state[j] = OCCUPIED
             elif ratios[FREE] >= self.p.vote_ratio:
                 self.state[j] = FREE
             elif ratios[cur] >= self.p.keep_ratio:
-                pass                                # إبقاء الحالة السابقة (hysteresis)
+                pass                                # keep the previous status (hysteresis)
             else:
                 self.state[j] = UNKNOWN
         return self.state
@@ -137,7 +137,7 @@ class OccupancyTracker:
 
 
 def _edge_density(edges, pts):
-    """نسبة بكسلات الحواف في الجزء الداخلي من الموقف (نتجاهل خطوط التخطيط على الأطراف)."""
+    """Share of edge pixels in the spot's interior (ignores the painted lines at the edges)."""
     c = pts.mean(0)
     inner = (c + 0.6 * (pts - c)).astype(np.int32)
     x, y, w, h = cv2.boundingRect(inner)
