@@ -1,11 +1,11 @@
 """
-تثبيت الصورة (Frame alignment).
+Frame alignment (image stabilization).
 
-إحداثيات المواقف تُحفظ على "إطار مرجعي" واحد لكل كاميرا. إذا اهتزت الكاميرا أو تحركت
-قليلًا (مثل تصوير الدرون في Parking.mp4)، نحسب لكل إطار مصفوفة تحويل (Homography)
-تربطه بالإطار المرجعي، فتبقى المواقف في أماكنها الصحيحة على الصورة.
+Parking spot coordinates are stored against one "reference frame" per camera. If the camera shakes or moves
+slightly (like the drone footage in Parking.mp4), we compute a homography for each frame
+that maps it to the reference frame, so the spots stay in the right place on the image.
 
-للكاميرات الثابتة تمامًا تكون المصفوفة قريبة من المصفوفة الأحادية ولا يتغير شيء.
+For fully fixed cameras the matrix is close to identity and nothing changes.
 """
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ class FrameAligner:
         self.orb = cv2.ORB_create(nfeatures=n_features)
         self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
         self.ref_kp, self.ref_des = self._features(reference_frame)
-        # مشهد بلا تفاصيل كافية (أرضية متجانسة): لا يمكن التثبيت -> نفترض كاميرا ثابتة
+        # Scene without enough detail (uniform ground): alignment is impossible -> assume a fixed camera
         self.usable = self.ref_des is not None and len(self.ref_kp) >= 80
-        self.last_H = np.eye(3)          # آخر تحويل ناجح (إطار حالي -> مرجعي)
+        self.last_H = np.eye(3)          # last successful transform (current frame -> reference)
         self.last_inliers = 0
 
     def _features(self, frame):
@@ -32,7 +32,7 @@ class FrameAligner:
         return self.orb.detectAndCompute(g, None)
 
     def match_score(self, frame) -> tuple[np.ndarray | None, int]:
-        """يحسب التحويل من هذا الإطار إلى المرجعي. يرجع (H, عدد النقاط المتطابقة)."""
+        """Compute the transform from this frame to the reference. Returns (H, number of matched points)."""
         kp, des = self._features(frame)
         if des is None or self.ref_des is None or len(kp) < 10:
             return None, 0
@@ -46,14 +46,14 @@ class FrameAligner:
         if H is None:
             return None, 0
         inl = int(mask.sum())
-        # رفض التحويلات غير المنطقية (تكبير/تصغير شديد)
+        # Reject implausible transforms (extreme zoom in/out)
         det = np.linalg.det(H[:2, :2])
         if not (0.5 < det < 2.0) or inl < 12:
             return None, inl
         return H, inl
 
     def align(self, frame) -> tuple[np.ndarray, bool]:
-        """يرجع (H إطار->مرجعي، هل نجح التثبيت في هذا الإطار)."""
+        """Returns (H frame->reference, whether alignment succeeded for this frame)."""
         if not self.usable:
             return np.eye(3), True
         H, inl = self.match_score(frame)
