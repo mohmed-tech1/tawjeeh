@@ -1,4 +1,4 @@
-"""رسم المواقف والعدادات على الإطار."""
+"""Draw parking spots and counters on a frame."""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ import numpy as np
 
 from .occupancy import FREE, OCCUPIED, UNKNOWN
 
-# ألوان OpenCV بترتيب BGR
+# OpenCV colors in BGR order
 COLORS = {
-    FREE: (60, 200, 60),        # أخضر = متاح
-    OCCUPIED: (40, 40, 230),    # أحمر = مشغول
-    UNKNOWN: (0, 200, 255),     # أصفر/برتقالي = غير مؤكد
+    FREE: (60, 200, 60),        # green = available
+    OCCUPIED: (40, 40, 230),    # red = occupied
+    UNKNOWN: (0, 200, 255),     # yellow/orange = uncertain
 }
 
 
@@ -20,7 +20,7 @@ def draw_spots(frame, spots, states, H_ref_to_frame, show_ids=True):
     for spot in spots:
         pts = cv2.perspectiveTransform(spot.polygon.reshape(-1, 1, 2).astype(np.float32), H_ref_to_frame)
         warped.append(pts.reshape(-1, 2).round().astype(np.int32))
-    # تعبئة خفيفة للمواقف المتاحة (طبقة واحدة لكل المواقف لسرعة الرسم)
+    # Light fill for available spots (one layer for all spots, for faster drawing)
     free_polys = [p for p, st in zip(warped, states) if st == FREE]
     if free_polys:
         overlay = frame.copy()
@@ -43,7 +43,7 @@ def draw_spots(frame, spots, states, H_ref_to_frame, show_ids=True):
 
 def draw_panel(frame, counts, title="Tawjeeh - Smart Parking", extra=None):
     h, w = frame.shape[:2]
-    s = max(0.5, w / 1920 * 0.9)          # حجم الخط حسب دقة الفيديو
+    s = max(0.5, w / 1920 * 0.9)          # font size scales with video resolution
     lh = int(32 * s / 0.6)
     lines = [
         (title, (255, 255, 255)),
