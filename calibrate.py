@@ -1,20 +1,20 @@
 """
-أداة معايرة المواقف (مراجعة/تعديل يدوي) - تُستخدم مرة واحدة لكل كاميرا.
+Spot calibration tool (manual review/edit) - used once per camera.
 
-التشغيل:
-    .\\.venv\\Scripts\\python.exe calibrate.py Parking.mp4            # يفتح المواقف المكتشفة تلقائيًا للمراجعة
-    .\\.venv\\Scripts\\python.exe calibrate.py cam2.mp4 --empty       # يبدأ بدون مواقف (تحديد يدوي كامل)
-    .\\.venv\\Scripts\\python.exe calibrate.py cam2.mp4 --empty --frame 120   # استخدام إطار آخر كمرجع
+Usage:
+    .\\.venv\\Scripts\\python.exe calibrate.py Parking.mp4            # opens the automatically detected spots for review
+    .\\.venv\\Scripts\\python.exe calibrate.py cam2.mp4 --empty       # starts with no spots (fully manual)
+    .\\.venv\\Scripts\\python.exe calibrate.py cam2.mp4 --empty --frame 120   # uses another frame as the reference
 
-التحكم في النافذة:
-    زر الفأرة الأيسر  : إضافة نقطة. كل 4 نقاط = موقف جديد (بالترتيب حول الموقف).
-                        النقر على مكان رمادي "?" يقبله كموقف.
-    زر الفأرة الأيمن  : حذف الموقف الذي تحت المؤشر.
-    D : وضع النسخ - كل نقرة يسار تضع نسخة من آخر موقف في مكان النقرة (أسرع لصف كامل).
-    C : قبول كل الأماكن الرمادية المرشحة.
-    Z : تراجع عن آخر نقطة / آخر موقف مضاف.
-    S : حفظ (ويعيد ترقيم المواقف A1, A2 ...).
-    Q أو Esc : خروج.
+Window controls:
+    Left mouse button  : add a point. Every 4 points = a new spot (in order around the spot).
+                        Clicking a gray "?" place accepts it as a spot.
+    Right mouse button : delete the spot under the cursor.
+    D : copy mode - each left click places a copy of the last spot at the click position (faster for a whole row).
+    C : accept all gray candidate places.
+    Z : undo the last point / last added spot.
+    S : save (and renumber the spots A1, A2 ...).
+    Q or Esc : exit.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ except Exception:  # noqa: BLE001
 
 
 class SpotEditor:
-    """منطق التعديل (بدون واجهة) حتى يمكن اختباره."""
+    """Editing logic (no UI) so it can be tested."""
 
     def __init__(self, cfg: CameraConfig, ref_frame):
         self.cfg = cfg
@@ -54,7 +54,7 @@ class SpotEditor:
 
     def left_click(self, x, y):
         if not self.points:
-            for i, c in enumerate(self.cfg.candidates):          # قبول مكان مرشح
+            for i, c in enumerate(self.cfg.candidates):          # accept a candidate place
                 if self._inside(c.polygon, x, y):
                     spot = Spot("new", c.polygon.copy(), "manual")
                     self.cfg.candidates.pop(i)
@@ -68,7 +68,7 @@ class SpotEditor:
         self.points.append((x, y))
         if len(self.points) == 4:
             poly = np.array(self.points, np.float32)
-            # ترتيب النقاط حول المركز لتجنب المضلع المتقاطع
+            # Sort the points around the center to avoid a self-intersecting polygon
             c = poly.mean(0)
             order = np.argsort(np.arctan2(poly[:, 1] - c[1], poly[:, 0] - c[0]))
             self.points = []
@@ -115,7 +115,7 @@ class SpotEditor:
         self.cfg.spots = relabel(self.cfg.spots)
         if any(s.source == "manual" for s in self.cfg.spots) or self.cfg.source == "auto-failed":
             self.cfg.source = "manual" if all(s.source == "manual" for s in self.cfg.spots) else "auto+manual"
-        self.cfg.notes = [n for n in self.cfg.notes if "غير موثوق" not in n]
+        self.cfg.notes = [n for n in self.cfg.notes if "unreliable" not in n]
         save_config_with_reference(self.cfg, self.ref)
         self.dirty = False
 
@@ -147,7 +147,7 @@ def run_gui(editor: SpotEditor, max_width=1600):
     cv2.resizeWindow(win, int(w * scale), int(h * scale))
 
     def on_mouse(event, x, y, flags, param):
-        # النافذة قابلة لتغيير الحجم؛ OpenCV يعيد الإحداثيات بمقياس الصورة الأصلية
+        # The window is resizable; OpenCV returns coordinates at the original image scale
         if event == cv2.EVENT_LBUTTONDOWN:
             editor.left_click(x, y)
         elif event == cv2.EVENT_RBUTTONDOWN:
@@ -159,19 +159,19 @@ def run_gui(editor: SpotEditor, max_width=1600):
         k = cv2.waitKey(30) & 0xFF
         if k in (ord("q"), 27):
             if editor.dirty:
-                print("توجد تغييرات غير محفوظة: اضغط S للحفظ أو Q مرة أخرى للخروج بدون حفظ.")
+                print("There are unsaved changes: press S to save, or Q again to exit without saving.")
                 editor.dirty = False
                 continue
             break
         if k == ord("s"):
             editor.save()
-            print(f"تم الحفظ: {len(editor.cfg.spots)} موقف -> configs\\{Path(editor.cfg.video).stem}.json")
+            print(f"Saved: {len(editor.cfg.spots)} spots -> configs\\{Path(editor.cfg.video).stem}.json")
         elif k == ord("z"):
             editor.undo()
         elif k == ord("d"):
             editor.stamp_mode = not editor.stamp_mode
         elif k == ord("c"):
-            print(f"تم قبول {editor.accept_all_candidates()} مكان مرشح")
+            print(f"Accepted {editor.accept_all_candidates()} candidate places")
         if cv2.getWindowProperty(win, cv2.WND_PROP_VISIBLE) < 1:
             break
     cv2.destroyAllWindows()
@@ -180,8 +180,8 @@ def run_gui(editor: SpotEditor, max_width=1600):
 def main():
     ap = argparse.ArgumentParser(description="Tawjeeh - spot calibration tool")
     ap.add_argument("video")
-    ap.add_argument("--empty", action="store_true", help="البدء بدون مواقف (تحديد يدوي كامل)")
-    ap.add_argument("--frame", type=int, default=0, help="رقم الإطار المرجعي (مع --empty فقط)")
+    ap.add_argument("--empty", action="store_true", help="Start with no spots (fully manual)")
+    ap.add_argument("--frame", type=int, default=0, help="Reference frame number (with --empty only)")
     args = ap.parse_args()
 
     from main import resolve_video
@@ -199,7 +199,7 @@ def main():
         cfg = CameraConfig.load(cfg_path)
         ref = cv2.imread(str(CONFIGS_DIR / cfg.reference_image))
     else:
-        print("لا توجد إعدادات لهذا الفيديو؛ تشغيل الاكتشاف التلقائي أولًا...")
+        print("No settings for this video; running automatic detection first...")
         cfg = auto_calibrate(video)
         ref = cv2.imread(str(CONFIGS_DIR / cfg.reference_image))
 
