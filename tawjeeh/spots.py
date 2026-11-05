@@ -1,19 +1,19 @@
 """
-تعريف المواقف (Parking spots): الحفظ/التحميل، والاكتشاف التلقائي.
+Parking spot definitions: saving/loading and automatic detection.
 
-فكرة الاكتشاف التلقائي:
-  1) نكشف السيارات في عدد من الإطارات الموزعة على طول الفيديو، ونحوّل مواقعها إلى الإطار المرجعي.
-  2) السيارة المتوقفة تظهر في المكان نفسه في معظم الإطارات، أما السيارة المتحركة فتتغير مواقعها.
-     نجمع الكشوفات المتقاربة (clustering) ونقبل فقط الأماكن التي ظهرت فيها سيارة بشكل متكرر.
-  3) نرتب هذه الأماكن في صفوف (المواقف في الصف الواحد متجاورة ولها الاتجاه نفسه).
-  4) إذا وجدت فجوة داخل صف بحجم موقف أو أكثر بين سيارتين، فقد تكون مواقف فارغة أو ممرًا.
-     نقبلها كموقف "مستنتج" (inferred) فقط إذا شوهدت سيارة متوقفة فيها في إطارين على الأقل،
-     وإلا تُحفظ كمكان "مرشح" (candidate) لا يُحسب حتى يقبله المستخدم يدويًا.
+How automatic detection works:
+  1) Detect cars in several frames spread across the video, and map their positions to the reference frame.
+  2) A parked car appears in the same place in most frames, while a moving car's position changes.
+     Cluster nearby detections and accept only places where a car appeared repeatedly.
+  3) Arrange these places into rows (spots in a row are adjacent and share the same direction).
+  4) A gap in a row of one spot or more between two cars may be empty spots or a driving lane.
+     It is accepted as an "inferred" spot only if a parked car was seen there in at least two frames;
+     otherwise it is saved as a "candidate" place that is not counted until the user accepts it manually.
 
-حدود هذه الطريقة (مهم):
-  - موقف فارغ طوال الفيديو وفي طرف الصف (ليس بين سيارتين) لن يُكتشف تلقائيًا.
-  - إذا لم يكتشف النموذج سيارة معينة أبدًا فلن يظهر موقفها إلا إذا استُنتج من الفجوة.
-  - لذلك توجد أداة المعايرة اليدوية (calibrate.py) لإضافة/حذف المواقف وحفظها.
+Limitations of this method (important):
+  - A spot that stays empty for the whole video and sits at the end of a row (not between two cars) will not be detected automatically.
+  - If the model never detects a particular car, its spot appears only if it is inferred from a gap.
+  - That is why the manual calibration tool (calibrate.py) exists, for adding/removing spots and saving them.
 """
 
 from __future__ import annotations
@@ -27,10 +27,10 @@ import cv2
 import numpy as np
 
 
-@dataclass(eq=False)   # المقارنة بالهوية (المضلع مصفوفة numpy)
+@dataclass(eq=False)   # compared by identity (the polygon is a numpy array)
 class Spot:
     id: str
-    polygon: np.ndarray          # (N,2) بإحداثيات الإطار المرجعي
+    polygon: np.ndarray          # (N,2) in reference-frame coordinates
     source: str = "detected"     # detected | inferred | manual
 
     def to_dict(self):
@@ -53,7 +53,7 @@ class CameraConfig:
     detector: dict = field(default_factory=dict)
     occupancy: dict = field(default_factory=dict)
     spots: list = field(default_factory=list)
-    candidates: list = field(default_factory=list)   # مواقف محتملة غير مؤكدة (لا تُحسب)
+    candidates: list = field(default_factory=list)   # possible unconfirmed spots (not counted)
     notes: list = field(default_factory=list)
 
     def save(self, path: Path):
@@ -77,10 +77,10 @@ class CameraConfig:
 
 
 # ---------------------------------------------------------------------- #
-# أدوات هندسية للمستطيلات المائلة
+# Geometry helpers for rotated rectangles
 # ---------------------------------------------------------------------- #
 def rect_params(poly: np.ndarray):
-    """يرجع (cx, cy, short, long, theta) حيث theta اتجاه المحور الطويل بالدرجات [0,180)."""
+    """Returns (cx, cy, short, long, theta), where theta is the long axis direction in degrees [0,180)."""
     (cx, cy), (w, h), ang = cv2.minAreaRect(poly.astype(np.float32))
     if w >= h:
         long_, short, theta = w, h, ang
@@ -94,7 +94,7 @@ def rect_polygon(cx, cy, short, long_, theta):
 
 
 def _angle_mean(thetas):
-    """متوسط زوايا دورية كل 180 درجة."""
+    """Mean of angles with a 180-degree period."""
     t = np.radians(np.asarray(thetas) * 2)
     return (np.degrees(np.arctan2(np.sin(t).mean(), np.cos(t).mean())) / 2) % 180
 
@@ -105,27 +105,27 @@ def _angle_diff(a, b):
 
 
 # ---------------------------------------------------------------------- #
-# الاكتشاف التلقائي
+# Automatic detection
 # ---------------------------------------------------------------------- #
 def discover_spots(det_per_frame: list[list[np.ndarray]], min_presence: float = 0.25,
                    fill_gaps: bool = True, max_gap_spots: int = 4, min_row_len: int = 3):
     """
-    det_per_frame: لكل إطار عينة، قائمة مضلعات السيارات (بإحداثيات الإطار المرجعي).
-    يرجع (spots, candidates, report)
+    det_per_frame: for each sample frame, a list of car polygons (in reference-frame coordinates).
+    Returns (spots, candidates, report)
     """
     n_frames = len(det_per_frame)
     all_rects = [rect_params(p) for frame in det_per_frame for p in frame]
     frame_ids = [i for i, frame in enumerate(det_per_frame) for _ in frame]
     if not all_rects:
-        return [], [], {"error": "لم تُكتشف أي سيارات في الإطارات المختارة"}
+        return [], [], {"error": "No cars were detected in the selected frames"}
     R = np.array(all_rects, np.float32)
     med_short = float(np.median(R[:, 2]))
 
-    # 1) تجميع الكشوفات المتقاربة (نصف القطر يتناسب مع حجم كل سيارة، لدعم المنظور المائل)
-    clusters = []  # كل عنصر: dict(members)
+    # 1) Cluster nearby detections (radius scales with each car's size, to support angled perspective)
+    clusters = []  # each item: dict(members)
     centers = np.zeros((0, 2), np.float32)
     sizes = np.zeros(0, np.float32)
-    for idx in np.argsort(-R[:, 3]):  # ترتيب ثابت
+    for idx in np.argsort(-R[:, 3]):  # stable ordering
         p = R[idx, :2]
         if len(centers):
             d = np.linalg.norm(centers - p, axis=1)
@@ -140,7 +140,7 @@ def discover_spots(det_per_frame: list[list[np.ndarray]], min_presence: float = 
         centers = np.vstack([centers, p])
         sizes = np.append(sizes, R[idx, 2])
 
-    # 2) قبول الأماكن التي ظهرت فيها سيارة في عدد كافٍ من الإطارات
+    # 2) Accept places where a car appeared in enough frames
     min_hits = max(2, int(np.ceil(min_presence * n_frames)))
     cand = []
     for c in clusters:
@@ -153,7 +153,7 @@ def discover_spots(det_per_frame: list[list[np.ndarray]], min_presence: float = 
                          theta=float(_angle_mean(M[:, 4])), hits=len(frames_hit), source="detected"))
     rejected_moving = len(clusters) - len(cand)
 
-    # إزالة التكرار: مكانان متداخلان (أكثر من 30% من الأصغر) -> نُبقي الأكثر ظهورًا
+    # Remove duplicates: two overlapping places (over 30% of the smaller) -> keep the one seen most often
     cand.sort(key=lambda c: -c["hits"])
     kept = []
     for c in cand:
@@ -172,17 +172,17 @@ def discover_spots(det_per_frame: list[list[np.ndarray]], min_presence: float = 
             kept.append(c)
     cand = kept
 
-    # 3) تكوين الصفوف
+    # 3) Form rows
     rows = _group_rows(cand)
 
-    # استبعاد الأماكن المعزولة (ليست ضمن صف) لأنها غالبًا سيارات في الممرات
+    # Exclude isolated places (not part of a row) since they are usually cars in driving lanes
     isolated = sum(len(r) for r in rows if len(r) < min_row_len)
     rows = [r for r in rows if len(r) >= min_row_len]
 
-    # 4) ملء الفجوات داخل الصفوف
-    #    الفجوة قد تكون مواقف فارغة، وقد تكون ممرًا للسيارات (مثل الأسهم في Parking.mp4).
-    #    لذلك لا نقبل الموقف المستنتج إلا إذا شوهدت سيارة داخله في إطارين على الأقل (دليل فعلي).
-    #    الأماكن بلا دليل تُحفظ كـ "مرشحة" (candidates) ولا تُحسب، ويمكن قبولها يدويًا في calibrate.py.
+    # 4) Fill gaps within rows
+    #    A gap may be empty spots or a driving lane (like the arrows in Parking.mp4).
+    #    So an inferred spot is accepted only if a car was seen inside it in at least two frames (real evidence).
+    #    Places with no evidence are saved as "candidates" and not counted; they can be accepted manually in calibrate.py.
     candidates = []
     if fill_gaps:
         for row in rows:
@@ -214,7 +214,7 @@ def discover_spots(det_per_frame: list[list[np.ndarray]], min_presence: float = 
 
 
 def _gap_evidence(c, R, frame_ids):
-    """عدد الإطارات التي ظهرت فيها سيارة داخل هذا المكان وبنفس اتجاه المواقف."""
+    """Number of frames where a car appeared inside this place with the same direction as the spots."""
     d = np.hypot(R[:, 0] - c["cx"], R[:, 1] - c["cy"])
     near = np.where(d < 0.5 * c["short"])[0]
     frames = {frame_ids[i] for i in near if _angle_diff(R[i, 4], c["theta"]) < 25}
@@ -223,8 +223,8 @@ def _gap_evidence(c, R, frame_ids):
 
 def _row_axes(c):
     t = np.radians(c["theta"])
-    u = np.array([np.cos(t), np.sin(t)])     # اتجاه طول السيارة
-    v = np.array([-np.sin(t), np.cos(t)])    # اتجاه الصف (السيارات بجانب بعضها)
+    u = np.array([np.cos(t), np.sin(t)])     # car length direction
+    v = np.array([-np.sin(t), np.cos(t)])    # row direction (cars side by side)
     return u, v
 
 
@@ -258,7 +258,7 @@ def _group_rows(cand):
 
 def _order_along_row(row):
     v = _row_axes({"theta": _angle_mean([c["theta"] for c in row])})[1]
-    # نجعل الترتيب من اليسار لليمين / من الأعلى للأسفل
+    # Order from left to right / top to bottom
     if abs(v[0]) >= abs(v[1]):
         v = v if v[0] > 0 else -v
     else:
@@ -273,7 +273,7 @@ def _fill_row_gaps(row, max_gap_spots):
     _order_along_row(row)
     gaps = [np.hypot(b["cx"] - a["cx"], b["cy"] - a["cy"]) for a, b in zip(row, row[1:])]
     pitch = float(np.median(gaps))
-    # المسافة بين موقفين متجاورين لا تقل عن عرض السيارة
+    # The distance between two adjacent spots is at least one car width
     pitch = max(pitch, 1.05 * float(np.median([c["short"] for c in row])))
     new = []
     for a, b, g in zip(list(row), row[1:], gaps):
@@ -299,14 +299,14 @@ def _label_rows(rows):
     spots = []
     for ri, row in enumerate(rows):
         for k, c in enumerate(row, 1):
-            # نوسّع المضلع قليلًا ليمثل الموقف وليس السيارة فقط
+            # Expand the polygon slightly so it represents the spot, not just the car
             poly = rect_polygon(c["cx"], c["cy"], c["short"] * 1.08, c["long"] * 1.05, c["theta"])
             spots.append(Spot(f"{_row_letter(ri)}{k}", poly, c["source"]))
     return spots
 
 
 def relabel(spots: list[Spot]) -> list[Spot]:
-    """يعيد ترقيم المواقف (بعد التعديل اليدوي) بنفس منطق الصفوف."""
+    """Renumbers the spots (after manual editing) using the same row logic."""
     cand = []
     for s in spots:
         cx, cy, sh, lo, th = rect_params(s.polygon)
