@@ -1,13 +1,13 @@
 """
-كاشف السيارات (Vehicle detector) باستخدام نماذج YOLO بصيغة ONNX.
+Vehicle detector using YOLO models in ONNX format.
 
-- يعمل على CPU فقط، ولا يحتاج PyTorch أو Ultralytics.
-- يستخدم onnxruntime إن كان مثبتًا (أسرع)، وإلا يستخدم cv2.dnn من OpenCV.
-- يدعم نوعين من النماذج:
-    1) yolo11n.onnx      : نموذج COCO عام (car / bus / truck) - مناسب للكاميرات المائلة.
-    2) yolo11n-obb.onnx  : نموذج صور جوية DOTA (small/large vehicle) بمربعات مائلة - مناسب للتصوير من الأعلى.
-- يدعم التقطيع (tiling): تقسيم الإطار إلى مربعات متداخلة وتكبيرها، لأن السيارات في
-  التصوير الجوي صغيرة جدًا ويضيع كثير منها إذا صُغّر الإطار كاملًا لحجم النموذج.
+- Runs on CPU only and does not need PyTorch or Ultralytics.
+- Uses onnxruntime if installed (faster), otherwise falls back to OpenCV's cv2.dnn.
+- Supports two model types:
+    1) yolo11n.onnx      : general COCO model (car / bus / truck) - suited to angled cameras.
+    2) yolo11n-obb.onnx  : DOTA aerial model (small/large vehicle) with oriented boxes - suited to top-down footage.
+- Supports tiling: splits the frame into overlapping tiles and enlarges them, because cars in
+  aerial footage are very small and many are lost if the whole frame is shrunk to the model's size.
 """
 
 from __future__ import annotations
@@ -20,20 +20,20 @@ import cv2
 import numpy as np
 
 try:
-    import onnxruntime as ort  # اختياري
+    import onnxruntime as ort  # optional
 except Exception:  # noqa: BLE001
     ort = None
 
 
-# أسماء الفئات التي نعتبرها "سيارة" في كل نوع نموذج
+# Class names treated as a "car" for each model type
 COCO_VEHICLE_NAMES = {"car", "truck", "bus"}
 DOTA_VEHICLE_NAMES = {"small vehicle", "large vehicle"}
 
 
 @dataclass
 class Detection:
-    """سيارة مكتشفة واحدة."""
-    polygon: np.ndarray   # (4, 2) زوايا المربع (قد يكون مائلًا) بإحداثيات الإطار
+    """A single detected car."""
+    polygon: np.ndarray   # (4, 2) box corners (possibly rotated) in frame coordinates
     center: tuple          # (x, y)
     conf: float
     label: str
@@ -48,15 +48,15 @@ class VehicleDetector:
                  tile_size: int | None = None, tile_overlap: float = 0.2,
                  imgsz: int | None = None):
         """
-        model_path : مسار ملف ONNX.
-        conf       : أقل ثقة لقبول الكشف.
-        iou        : عتبة دمج الكشوفات المتكررة (NMS).
-        tile_size  : حجم كل مقطع بالبكسل من الإطار الأصلي (None = الإطار كاملًا).
-        imgsz      : حجم إدخال النموذج (يُقرأ من النموذج إن كان ثابتًا).
+        model_path : path to the ONNX file.
+        conf       : minimum confidence to accept a detection.
+        iou        : threshold for merging duplicate detections (NMS).
+        tile_size  : size of each tile in original-frame pixels (None = whole frame).
+        imgsz      : model input size (read from the model if fixed).
         """
         self.model_path = str(model_path)
         if not Path(self.model_path).exists():
-            raise FileNotFoundError(f"ملف النموذج غير موجود: {self.model_path}")
+            raise FileNotFoundError(f"Model file not found: {self.model_path}")
         self.conf = conf
         self.iou = iou
         self.tile_size = tile_size
@@ -97,7 +97,7 @@ class VehicleDetector:
             if len(b):
                 b[:, 0] += x0
                 b[:, 1] += y0
-                # تجاهل الكشوفات المقطوعة عند حافة المقطع (ستظهر كاملة في المقطع المجاور)
+                # Ignore detections cut off at a tile edge (they appear whole in the neighboring tile)
                 keep = self._not_on_inner_edge(b, (x0, y0, x1, y1), w, h)
                 boxes.append(b[keep]); scores.append(s[keep]); labels += [l[i] for i in np.where(keep)[0]]
         if not boxes:
@@ -133,7 +133,7 @@ class VehicleDetector:
         return ~(left | right | top | bot)
 
     def _infer(self, img):
-        """يرجع مصفوفة (N,5): cx,cy,w,h,angle(rad) بإحداثيات الصورة المدخلة."""
+        """Returns an (N,5) array: cx,cy,w,h,angle(rad) in input-image coordinates."""
         s = self.imgsz
         h, w = img.shape[:2]
         r = min(s / w, s / h)
