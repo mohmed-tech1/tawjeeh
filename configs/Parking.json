@@ -25,7 +25,7 @@
   "use_appearance_check": true
  },
  "notes": [
-  "7 مكان محتمل (فجوات بلا دليل على وجود سيارة) لم يُحسب كموقف؛ راجعها في صورة المعاينة (رمادي) واقبل الصحيح منها عبر calibrate.py."
+  "7 possible spots (gaps with no evidence of a car) were not counted; review them in the preview image (gray) and accept the correct ones with calibrate.py."
  ],
  "spots": [
   {
