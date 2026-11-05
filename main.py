@@ -1,18 +1,18 @@
 """
-Tawjeeh - نظام المواقف الذكية
-ملف التشغيل الرئيسي.
+Tawjeeh - Smart Parking System
+Main entry point.
 
-أمثلة (من داخل مجلد المشروع على Windows):
-    .\\.venv\\Scripts\\python.exe main.py                     # يعالج كل الفيديوهات في المجلد و videos\\
-    .\\.venv\\Scripts\\python.exe main.py Parking.mp4         # فيديو واحد
+Examples (from inside the project folder on Windows):
+    .\\.venv\\Scripts\\python.exe main.py                     # processes every video in the folder and the videos folder
+    .\\.venv\\Scripts\\python.exe main.py Parking.mp4         # one video
     .\\.venv\\Scripts\\python.exe main.py Parking.mp4 --no-show
-    .\\.venv\\Scripts\\python.exe main.py cam2.mp4 --config configs\\Parking.json   # نفس الكاميرا/المشهد
-    .\\.venv\\Scripts\\python.exe main.py Parking.mp4 --recalibrate               # إعادة الاكتشاف التلقائي
+    .\\.venv\\Scripts\\python.exe main.py cam2.mp4 --config configs\\Parking.json   # same camera/scene
+    .\\.venv\\Scripts\\python.exe main.py Parking.mp4 --recalibrate               # re-run automatic detection
 
-لكل فيديو:
-  - إذا لم توجد إعدادات مواقف له في configs\\ ، يتم اكتشاف المواقف تلقائيًا وحفظها.
-  - إذا كان الاكتشاف التلقائي غير موثوق، يتوقف ويطلب المعايرة اليدوية عبر calibrate.py.
-  - الناتج في output\\ : <اسم>_result.mp4 و <اسم>_counts.csv و <اسم>_summary.json
+For each video:
+  - If no spot settings exist for it in configs\\ , spots are detected automatically and saved.
+  - If automatic detection is unreliable, it stops and asks for manual calibration with calibrate.py.
+  - Output in output\\ : <name>_result.mp4, <name>_counts.csv and <name>_summary.json
 """
 
 from __future__ import annotations
@@ -44,23 +44,23 @@ def resolve_video(arg: str) -> Path:
     for cand in (p, ROOT / p, ROOT / "videos" / p):
         if cand.exists():
             return cand.resolve()
-    raise FileNotFoundError(f"الفيديو غير موجود: {arg}")
+    raise FileNotFoundError(f"Video not found: {arg}")
 
 
 def main():
     ap = argparse.ArgumentParser(description="Tawjeeh smart parking detection")
-    ap.add_argument("videos", nargs="*", help="فيديو أو أكثر (بدون قيمة = كل الفيديوهات)")
-    ap.add_argument("--config", help="استخدام ملف إعدادات محدد (لفيديو آخر من نفس الكاميرا)")
-    ap.add_argument("--recalibrate", action="store_true", help="إعادة اكتشاف المواقف تلقائيًا")
-    ap.add_argument("--no-show", action="store_true", help="عدم عرض نافذة الفيديو أثناء المعالجة")
-    ap.add_argument("--no-ids", action="store_true", help="إخفاء أرقام المواقف")
-    ap.add_argument("--detect-every", type=int, default=1, help="تشغيل الكشف كل N إطار (أسرع على الأجهزة الضعيفة)")
-    ap.add_argument("--max-frames", type=int, default=None, help="معالجة أول N إطار فقط (للتجربة)")
+    ap.add_argument("videos", nargs="*", help="One or more videos (none = all videos)")
+    ap.add_argument("--config", help="Use a specific settings file (for another video from the same camera)")
+    ap.add_argument("--recalibrate", action="store_true", help="Re-run automatic spot detection")
+    ap.add_argument("--no-show", action="store_true", help="Do not show the video window during processing")
+    ap.add_argument("--no-ids", action="store_true", help="Hide spot numbers")
+    ap.add_argument("--detect-every", type=int, default=1, help="Run detection every N frames (faster on weak machines)")
+    ap.add_argument("--max-frames", type=int, default=None, help="Process only the first N frames (for testing)")
     args = ap.parse_args()
 
     videos = [resolve_video(v) for v in args.videos] if args.videos else find_videos()
     if not videos:
-        print("لم يتم العثور على فيديوهات. ضع ملفات MP4 في مجلد المشروع أو في مجلد videos\\")
+        print("No videos found. Put MP4 files in the project folder or in the videos\\ folder")
         return 1
 
     results = []
@@ -69,17 +69,17 @@ def main():
         cfg_path = Path(args.config) if args.config else config_path_for(video)
         if cfg_path.exists() and not args.recalibrate:
             cfg = CameraConfig.load(cfg_path)
-            print(f"[إعدادات] {cfg_path.name}: {len(cfg.spots)} موقف (المصدر: {cfg.source})")
+            print(f"[Settings] {cfg_path.name}: {len(cfg.spots)} spots (source: {cfg.source})")
             if not check_config_matches(cfg, video):
-                print(f"  ✗ تم تخطي {video.name}: إعدادات المواقف لا تطابق هذه الكاميرا.\n"
-                      f"    شغّل: python main.py \"{video.name}\" --recalibrate   أو   python calibrate.py \"{video.name}\"")
+                print(f"  ✗ Skipped {video.name}: the spot settings do not match this camera.\n"
+                      f"    Run: python main.py \"{video.name}\" --recalibrate   or   python calibrate.py \"{video.name}\"")
                 continue
         else:
             cfg = auto_calibrate(video)
-            print(f"  - حُفظت الإعدادات في configs\\{video.stem}.json (راجع configs\\{video.stem}_spots_preview.jpg)")
+            print(f"  - Settings saved to configs\\{video.stem}.json (review configs\\{video.stem}_spots_preview.jpg)")
         if cfg.source == "auto-failed" or not cfg.spots:
-            print(f"  ✗ لا يمكن الاعتماد على الاكتشاف التلقائي لـ {video.name}.\n"
-                  f"    حدّد المواقف يدويًا مرة واحدة: python calibrate.py \"{video.name}\"")
+            print(f"  ✗ Automatic detection is not reliable for {video.name}.\n"
+                  f"    Mark the spots manually once: python calibrate.py \"{video.name}\"")
             continue
         summary = process_video(video, cfg, show=not args.no_show, detect_every=max(1, args.detect_every),
                                 max_frames=args.max_frames, show_ids=not args.no_ids)
@@ -87,11 +87,11 @@ def main():
 
     if results:
         print("=" * 70)
-        print("ملخص لكل فيديو (الحالة في آخر إطار):")
+        print("Summary per video (status in the last frame):")
         for s in results:
             c = s["final_counts"]
-            print(f"  {s['video']:<30} متاح={c['free']:<4} مشغول={c['occupied']:<4} "
-                  f"غير مؤكد={c['unknown']:<4} الإجمالي={c['total']}  -> output\\{s['output_video']}")
+            print(f"  {s['video']:<30} available={c['free']:<4} occupied={c['occupied']:<4} "
+                  f"uncertain={c['unknown']:<4} total={c['total']}  -> output\\{s['output_video']}")
     return 0
 
 
