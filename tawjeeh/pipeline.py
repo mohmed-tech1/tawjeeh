@@ -1,7 +1,7 @@
 """
-خط المعالجة الكامل:
-  - auto_calibrate : اكتشاف المواقف تلقائيًا لفيديو/كاميرا وحفظ الإعدادات.
-  - process_video  : معالجة الفيديو وإخراج فيديو MP4 + ملف إحصائيات.
+Full processing pipeline:
+  - auto_calibrate : automatically detect the spots for a video/camera and save the settings.
+  - process_video  : process the video and output an MP4 video plus a statistics file.
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ CONFIGS_DIR = ROOT / "configs"
 OUTPUT_DIR = ROOT / "output"
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".m4v"}
 
-MODEL_AERIAL = "yolo11n-obb.onnx"   # كاميرات من الأعلى (درون/سقف)
-MODEL_GROUND = "yolo11n.onnx"       # كاميرات مائلة / أرضية
+MODEL_AERIAL = "yolo11n-obb.onnx"   # top-down cameras (drone/ceiling)
+MODEL_GROUND = "yolo11n.onnx"       # angled / ground-level cameras
 
 
 def config_path_for(video: Path) -> Path:
@@ -40,14 +40,14 @@ def read_frame(video: Path, index: int):
     ok, frame = cap.read()
     cap.release()
     if not ok:
-        raise RuntimeError(f"تعذر قراءة الإطار {index} من {video}")
+        raise RuntimeError(f"Could not read frame {index} from {video}")
     return frame
 
 
 def video_info(video: Path):
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
-        raise RuntimeError(f"تعذر فتح الفيديو: {video}")
+        raise RuntimeError(f"Could not open video: {video}")
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -62,25 +62,25 @@ def make_detector(det_cfg: dict) -> VehicleDetector:
 
 
 def choose_detector(frame, log=print) -> dict:
-    """يجرب نموذج التصوير الجوي والنموذج العادي، ويختار الذي يكتشف سيارات أكثر في هذا المشهد."""
+    """Tries the aerial model and the regular model, and picks the one that detects more cars in this scene."""
     best = None
     for model in (MODEL_AERIAL, MODEL_GROUND):
         if not (MODELS_DIR / model).exists():
             continue
         cfg = {"model": model, "conf": 0.25, "iou": 0.45, "tile_size": None}
         n = len(make_detector(cfg).detect(frame))
-        log(f"  - النموذج {model}: {n} سيارة في الإطار المرجعي")
+        log(f"  - Model {model}: {n} cars in the reference frame")
         if best is None or n > best[1]:
             best = (cfg, n)
     if best is None:
-        raise FileNotFoundError(f"لا يوجد أي نموذج في {MODELS_DIR}")
+        raise FileNotFoundError(f"No model found in {MODELS_DIR}")
     return best[0]
 
 
 # ---------------------------------------------------------------------- #
 def auto_calibrate(video: Path, n_samples: int = 40, ref_index: int = 0, log=print) -> CameraConfig:
     fps, n_frames, w, h = video_info(video)
-    log(f"[معايرة تلقائية] {video.name}: {w}x{h}, {fps:.1f} fps, {n_frames} إطار")
+    log(f"[Auto-calibration] {video.name}: {w}x{h}, {fps:.1f} fps, {n_frames} frames")
     ref = read_frame(video, ref_index)
     det_cfg = choose_detector(ref, log)
     detector = make_detector(det_cfg)
@@ -102,7 +102,7 @@ def auto_calibrate(video: Path, n_samples: int = 40, ref_index: int = 0, log=pri
         dets = detector.detect(frame)
         samples.append([warp_points(d.polygon, H) for d in dets])
     cap.release()
-    log(f"  - إطارات العينة: {len(samples)} (فشل التثبيت في {failed_align})")
+    log(f"  - Sample frames: {len(samples)} (alignment failed on {failed_align})")
 
     spots, candidates, report = discover_spots(samples)
     report["camera_motion_px_max"] = round(max(total_shift) if total_shift else 0.0, 1)
@@ -110,18 +110,18 @@ def auto_calibrate(video: Path, n_samples: int = 40, ref_index: int = 0, log=pri
                        source="auto", stabilize=True, detector=det_cfg,
                        occupancy=OccupancyParams().__dict__, spots=spots, candidates=candidates)
 
-    # تقييم موثوقية الاكتشاف التلقائي
+    # Assess the reliability of the automatic detection
     notes = []
     if len(spots) < 4:
-        notes.append("الاكتشاف التلقائي غير موثوق: عدد المواقف قليل جدًا. استخدم calibrate.py لتحديدها يدويًا.")
+        notes.append("Automatic detection is unreliable: too few spots found. Use calibrate.py to mark them manually.")
         cfg.source = "auto-failed"
     if candidates:
-        notes.append(f"{len(candidates)} مكان محتمل (فجوات بلا دليل على وجود سيارة) لم يُحسب كموقف؛ "
-                     "راجعها في صورة المعاينة (رمادي) واقبل الصحيح منها عبر calibrate.py.")
+        notes.append(f"{len(candidates)} possible spots (gaps with no evidence of a car) were not counted; "
+                     "review them in the preview image (gray) and accept the correct ones with calibrate.py.")
     if failed_align > len(idxs) / 3:
-        notes.append("الكاميرا تتحرك كثيرًا وفشل التثبيت في كثير من الإطارات.")
+        notes.append("The camera moves too much and alignment failed on many frames.")
     cfg.notes = notes
-    log("  - تقرير: " + json.dumps(report, ensure_ascii=False))
+    log("  - Report: " + json.dumps(report, ensure_ascii=False))
     for nt in notes:
         log("  ! " + nt)
     save_config_with_reference(cfg, ref)
@@ -135,7 +135,7 @@ def save_config_with_reference(cfg: CameraConfig, ref_frame):
     cv2.imwrite(str(ref_path), ref_frame)
     cfg.reference_image = ref_path.name
     cfg.save(CONFIGS_DIR / f"{stem}.json")
-    # صورة معاينة للمواقف للتحقق البصري
+    # Spot preview image for visual verification
     prev = ref_frame.copy()
     for s in cfg.spots:
         col = {"detected": (60, 200, 60), "inferred": (255, 160, 0), "manual": (255, 0, 255)}.get(s.source, (200, 200, 200))
@@ -152,10 +152,10 @@ def save_config_with_reference(cfg: CameraConfig, ref_frame):
 
 
 def check_config_matches(cfg: CameraConfig, video: Path, log=print) -> bool:
-    """يتأكد أن إعدادات المواقف تخص الكاميرا نفسها (لا نستخدم مواقف كاميرا على كاميرا أخرى)."""
+    """Checks that the spot settings belong to this same camera (never use one camera's spots on another)."""
     fps, n, w, h = video_info(video)
     if (w, h) != tuple(cfg.frame_size):
-        log(f"  ! دقة الفيديو {w}x{h} تختلف عن الإعدادات {cfg.frame_size}.")
+        log(f"  ! Video resolution {w}x{h} differs from the settings {cfg.frame_size}.")
         return False
     ref_path = CONFIGS_DIR / cfg.reference_image
     if not ref_path.exists():
@@ -164,29 +164,29 @@ def check_config_matches(cfg: CameraConfig, video: Path, log=print) -> bool:
     frame = read_frame(video, min(cfg.reference_frame_index, max(n - 1, 0)))
     aligner = FrameAligner(ref)
     if not aligner.usable:
-        return True        # مشهد بلا تفاصيل كافية للمقارنة؛ نكتفي بتطابق الدقة
+        return True        # scene lacks enough detail to compare; matching resolution is enough
     H, inliers = aligner.match_score(frame)
     if H is None or inliers < 40:
-        log(f"  ! المشهد لا يطابق صورة الإعدادات المرجعية (نقاط متطابقة: {inliers}).")
+        log(f"  ! Scene does not match the settings reference image (matched points: {inliers}).")
         return False
-    # نفس المكان لكن بزاوية مختلفة؟ نسمح فقط باهتزاز/انزياح بسيط (8% من قطر الصورة)
+    # Same place but a different angle? Only slight shake/shift is allowed (8% of the image diagonal)
     corners = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
     shift = np.linalg.norm(warp_points(corners, H) - corners, axis=1).max()
     if shift > 0.08 * np.hypot(w, h):
-        log(f"  ! زاوية الكاميرا مختلفة عن الإعدادات (انزياح {shift:.0f} بكسل).")
+        log(f"  ! Camera angle differs from the settings (shift of {shift:.0f} pixels).")
         return False
     return True
 
 
 # ---------------------------------------------------------------------- #
 def open_writer(path: Path, fps, size):
-    # mp4v يعمل مع OpenCV على Windows دون مكتبات إضافية ويفتح في VLC ومشغل Windows
+    # mp4v works with OpenCV on Windows without extra libraries and opens in VLC and Windows Media Player
     for fourcc in ("mp4v", "avc1"):
         wr = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*fourcc), fps, size)
         if wr.isOpened():
             return wr, fourcc
         wr.release()
-    raise RuntimeError("تعذر إنشاء ملف الفيديو الناتج (لا يوجد ترميز MP4 مدعوم في OpenCV)")
+    raise RuntimeError("Could not create the output video file (no supported MP4 codec in OpenCV)")
 
 
 def process_video(video: Path, cfg: CameraConfig, show: bool = True, detect_every: int = 1,
@@ -203,8 +203,8 @@ def process_video(video: Path, cfg: CameraConfig, show: bool = True, detect_ever
     aligner = FrameAligner(ref) if (cfg.stabilize and ref is not None) else None
 
     writer, codec = open_writer(out_path, fps, (w, h))
-    log(f"[معالجة] {video.name} -> {out_path.name} (ترميز {codec}, نموذج {cfg.detector['model']}, "
-        f"{len(cfg.spots)} موقف, محرك {detector.backend})")
+    log(f"[Processing] {video.name} -> {out_path.name} (codec {codec}, model {cfg.detector['model']}, "
+        f"{len(cfg.spots)} spots, engine {detector.backend})")
 
     cap = cv2.VideoCapture(str(video))
     H = np.eye(3)
@@ -227,7 +227,7 @@ def process_video(video: Path, cfg: CameraConfig, show: bool = True, detect_ever
             det_count = len(dets)
             det_ref = [warp_points(d.polygon, H) for d in dets]
             raw = tracker.raw_states(det_ref, frame, H_inv)
-            if align_fail_streak > fps:      # فقدنا التثبيت لأكثر من ثانية
+            if align_fail_streak > fps:      # alignment lost for more than a second
                 raw[:] = 2
             tracker.update(raw)
 
@@ -243,15 +243,15 @@ def process_video(video: Path, cfg: CameraConfig, show: bool = True, detect_ever
                 disp = vis if w <= 1600 else cv2.resize(vis, None, fx=1600 / w, fy=1600 / w)
                 cv2.imshow(win, disp)
                 if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
-                    log("  - أوقف المستخدم العرض.")
+                    log("  - Display stopped by the user.")
                     break
             except cv2.error:
                 show = False
-                log("  - لا يمكن فتح نافذة عرض في هذه البيئة؛ سيستمر الحفظ دون عرض.")
+                log("  - Cannot open a display window in this environment; continuing to save without display.")
         idx += 1
         if idx % 100 == 0:
             el = time.time() - t0
-            log(f"  {idx}/{n_frames} إطار ({idx / el:.1f} إطار/ث) متاح={counts['free']} مشغول={counts['occupied']} غير مؤكد={counts['unknown']}")
+            log(f"  {idx}/{n_frames} frames ({idx / el:.1f} frames/s) available={counts['free']} occupied={counts['occupied']} uncertain={counts['unknown']}")
     cap.release()
     writer.release()
     if show:
@@ -271,6 +271,6 @@ def process_video(video: Path, cfg: CameraConfig, show: bool = True, detect_ever
         "final_spot_states": {s.id: STATE_NAMES[int(st)] for s, st in zip(cfg.spots, tracker.state)},
     }
     (OUTPUT_DIR / f"{video.stem}_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
-    log(f"  ✓ تم: {idx} إطار في {summary['seconds']} ث. النهائي: متاح={final['free']} مشغول={final['occupied']} "
-        f"غير مؤكد={final['unknown']} من {final['total']}")
+    log(f"  ✓ Done: {idx} frames in {summary['seconds']} s. Final: available={final['free']} occupied={final['occupied']} "
+        f"uncertain={final['unknown']} of {final['total']}")
     return summary
